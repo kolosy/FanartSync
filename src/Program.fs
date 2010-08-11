@@ -10,6 +10,7 @@ let SourceFile = "--source-file"
 let TargetDir = "--target-dir"
 let FolderByShow = "--folder-by-show"
 let ApiKey = "--api-key"
+let Overwrite = "--overwrite-existing"
 
 let makeRequest host uri extra =
     (((new UriBuilder("http", host, 80, uri, extra)).Uri
@@ -31,23 +32,28 @@ let getMirrors apiKey =
 
     xml, banner, zip
 
-let rec position name (zipStream: ZipInputStream) = 
+let rec position (callbacks: (string * (ZipInputStream -> XmlDocument)) list) (zipStream: ZipInputStream) = 
     let entry = zipStream.GetNextEntry()
-    if (entry.Name = name) then
-        entry, zipStream
+    if not (entry = null) then
+        match List.tryPick (fun (name, cb) -> if entry.Name = name then Some (name, cb zipStream) else None) callbacks with
+        | Some v -> v :: position callbacks zipStream
+        | None -> position callbacks zipStream
     else
-        position name zipStream
+        []
 
 let getShowBanners zipMirrors apiKey showId =
     use req = makeRequest (List.head zipMirrors) (sprintf "/api/%s/series/%s/all/en.zip" apiKey showId) ""
-    let entry, zipStream = 
-        new ZipInputStream(req.GetResponseStream())
-        |> position "banners.xml"
-    
-    let bannersDoc = new XmlDocument()
-    bannersDoc.Load(zipStream)
-    showId,
-        bannersDoc.SelectNodes "/Banners/Banner[BannerType=\"fanart\"]"
+    let decoder (zipStream: ZipInputStream) =
+        let doc = new XmlDocument()
+        doc.Load(zipStream)
+        doc
+
+    let docs = 
+        position [ "en.xml", decoder; "banners.xml", decoder; ] (new ZipInputStream(req.GetResponseStream()))
+        |> Map.ofList
+
+    ((docs.["en.xml"]).SelectSingleNode "/Data/Series/SeriesName").InnerText,
+        (docs.["banners.xml"]).SelectNodes "/Banners/Banner[BannerType=\"fanart\"]"
         |> Seq.cast<XmlNode>
         |> Seq.map (fun node -> (node.SelectSingleNode "BannerPath").InnerText)
 
@@ -80,7 +86,7 @@ let saveLocal bannerMirrors showId dir overwrite path =
             fos.Write(buffer, 0, r)
             r <- stream.Read(buffer, 0, buffer.Length)
     else
-        printf "%s already exists. skipping" path
+        printfn "%s already exists. skipping" path
 
 let filterByTime dir lastTime series = 
     match lastTime with 
@@ -137,7 +143,8 @@ else
                         saveLocal 
                             banner 
                             show 
-                            (if Map.exists (fun k (t: string) -> k = FolderByShow && t.ToLower() = "true") argMap then Path.Combine(argMap.[TargetDir], show) else argMap.[TargetDir]) true) 
+                            (if Map.exists (fun k (t: string) -> k = FolderByShow && t.ToLower() = "true") argMap then Path.Combine(argMap.[TargetDir], show) else argMap.[TargetDir]) 
+                            (Map.exists (fun k (t: string) -> k = Overwrite && t.ToLower() = "true") argMap)) 
                     ) 
 
     printf "done."
