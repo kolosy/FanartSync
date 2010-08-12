@@ -52,7 +52,8 @@ let getShowBanners zipMirrors apiKey showId =
         position [ "en.xml", decoder; "banners.xml", decoder; ] (new ZipInputStream(req.GetResponseStream()))
         |> Map.ofList
 
-    ((docs.["en.xml"]).SelectSingleNode "/Data/Series/SeriesName").InnerText,
+    let invalidChars = [ Path.GetInvalidFileNameChars(); Path.GetInvalidFileNameChars() ] |> Array.concat
+    ((docs.["en.xml"]).SelectSingleNode "/Data/Series/SeriesName").InnerText |> String.map (fun c -> if Array.exists ((=) c) invalidChars then '_' else c),
         (docs.["banners.xml"]).SelectNodes "/Banners/Banner[BannerType=\"fanart\"]"
         |> Seq.cast<XmlNode>
         |> Seq.map (fun node -> (node.SelectSingleNode "BannerPath").InnerText)
@@ -72,25 +73,33 @@ let getServerTime dir =
     else Some (File.ReadAllText fName)    
 
 let saveLocal bannerMirrors showId dir overwrite path =
-    use req = makeRequest (List.head bannerMirrors) (sprintf "/banners/%s" path) ""
-    use stream = req.GetResponseStream()
-    let fileName = Path.Combine(dir, path.[path.LastIndexOf('/')+1..])
+    try
+        use req = makeRequest (List.head bannerMirrors) (sprintf "/banners/%s" path) ""
+        use stream = req.GetResponseStream()
+        let fileName = Path.Combine(dir, path.[path.LastIndexOf('/')+1..])
 
-    if (not (Directory.Exists dir)) then Directory.CreateDirectory dir |> ignore else ()
-    if (not (File.Exists fileName) || overwrite) then
-        if File.Exists fileName then File.Delete fileName else ()
-        use fos = File.Create fileName
-        let buffer = Array.create 2048 0uy
-        let mutable r = stream.Read(buffer, 0, buffer.Length)
-        while not (r = 0) do
-            fos.Write(buffer, 0, r)
-            r <- stream.Read(buffer, 0, buffer.Length)
-    else
-        printfn "%s already exists. skipping" path
+        if (not (Directory.Exists dir)) then Directory.CreateDirectory dir |> ignore else ()
+        if (not (File.Exists fileName) || overwrite) then
+            if File.Exists fileName then File.Delete fileName else ()
+            use fos = File.Create fileName
+            let buffer = Array.create 2048 0uy
+            let mutable r = stream.Read(buffer, 0, buffer.Length)
+            while not (r = 0) do
+                fos.Write(buffer, 0, r)
+                r <- stream.Read(buffer, 0, buffer.Length)
+        else
+            printfn "%s already exists. skipping" path
+    with
+    | :? WebException as e -> printf "%A when downloading %s %s. skipping." e.Message showId path
 
-let filterByTime dir lastTime series = 
+let filterByTime dir lastTime (series: string seq) = 
+    let filteredSeries = 
+        series
+        |> Seq.filter (fun show -> not (show.StartsWith("#")))
+        |> Seq.map (fun show -> show.Trim().[0..(match show.IndexOf('#') with | -1 -> show.Length-1 | _ as v -> v-1)])
+
     match lastTime with 
-    | None -> series
+    | None -> filteredSeries
     | Some time ->
         use req = makeRequest "www.thetvdb.com" "api/Updates.php" ("?type=all&time=" + time)
         let xml = (new XmlDocument())
@@ -100,8 +109,9 @@ let filterByTime dir lastTime series =
         |> Seq.cast<XmlNode>
         |> Seq.map (fun node -> node.InnerText)
         |> Set.ofSeq
-        |> Set.intersect (Set.ofSeq series)
-        |> List.ofSeq
+        |> Set.intersect (Set.ofSeq filteredSeries)
+        |> Set.toSeq
+    |> List.ofSeq
 
 if Environment.GetCommandLineArgs().Length = 1 then
     failwith "No arguments supplied"
@@ -147,5 +157,5 @@ else
                             (Map.exists (fun k (t: string) -> k = Overwrite && t.ToLower() = "true") argMap)) 
                     ) 
 
-    printf "done."
+    printf "done. press enter to quit."
     Console.ReadLine() |> ignore
